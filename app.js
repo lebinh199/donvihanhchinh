@@ -58,40 +58,49 @@ let rowsCache = []; // cached mapping rows for quick JS-side matching
 // Convert minimal MySQL DDL/DML to SQLite-friendly for sql.js
 // Thay toàn bộ hàm mysqlToSqlite trong app.js bằng bản này
 function mysqlToSqlite(sql) {
-  let s = sql
-    // 1) Bỏ các dòng cấu hình MySQL
-    .replace(/^SET\s+.*?;$/gmi, '')                 // SET NAMES..., SET FOREIGN_KEY_CHECKS...
-    .replace(/^LOCK\s+TABLES\s+.*?;$/gmi, '')       // LOCK TABLES ...
-    .replace(/^UNLOCK\s+TABLES\s*;$/gmi, '')        // UNLOCK TABLES;
-    .replace(/^DELIMITER\s+.+$/gmi, '')             // DELIMITER ;;
-    .replace(/\/\*![\s\S]*?\*\//g, '')              // /*!40101 ... */ phiên bản có điều kiện
-    // 2) Chuẩn hoá cú pháp
-    .replace(/`/g, '')                              // bỏ backticks
-    .replace(/ENGINE=InnoDB[^;]*;/gi, ';')          // bỏ ENGINE, ROW_FORMAT...
-    .replace(/AUTO_INCREMENT=\d+/gi, '')            // bỏ AUTO_INCREMENT
-    .replace(/USING\s+BTREE/gi, '')                 // bỏ USING BTREE
-    .replace(/ROW_FORMAT=\w+/gi, '')                // bỏ ROW_FORMAT=Dynamic
-    .replace(/\s+COMMENT\s*=\s*'[^']*'/gi, '')      // bỏ COMMENT='...'
-    .replace(/\s+COLLATE\s*=\s*\w+/gi, '')          // bỏ COLLATE=...
-    .replace(/DEFAULT\s+CHARSET\s*=\s*\w+/gi, '')   // bỏ DEFAULT CHARSET=...
-    // 3) Kiểu dữ liệu & ràng buộc
-    .replace(/bigint\(\d+\)\s+unsigned/gi, 'INTEGER')
-    .replace(/bigint\(\d+\)/gi, 'INTEGER')
-    .replace(/int\(\d+\)\s+unsigned/gi, 'INTEGER')
-    .replace(/int\(\d+\)/gi, 'INTEGER')
-    .replace(/varchar\(\d+\)/gi, 'TEXT')
-    .replace(/timestamp\s+NULL\s+DEFAULT\s+NULL/gi, 'TEXT')
-    // 4) Giao dịch MySQL (không cần cho client)
-    .replace(/BEGIN;\s*/gi, '')
-    .replace(/COMMIT;\s*/gi, '');
+  let s = sql;
 
-  // PRIMARY KEY (id) USING BTREE -> PRIMARY KEY (id)
-  s = s.replace(/PRIMARY\s+KEY\s*\(id\)\s*USING\s+BTREE/gi, 'PRIMARY KEY (id)');
+  // 0) Chuẩn hoá xuống dòng để regex bám chắc
+  s = s.replace(/\r\n/g, "\n");
 
-  // Một số dump MySQL có IF NOT EXISTS/EXISTS không ảnh hưởng SQLite — giữ nguyên.
-  // Nếu còn syntax lỗi, log ra để xem nhanh:
-  // console.log('SQL after transform:', s);
-  return s;
+  // 1) Gỡ bỏ các lệnh MySQL không hợp lệ với SQLite
+  s = s
+    // SET ...;  (mọi biến @OLD_..., FOREIGN_KEY_CHECKS, SQL_MODE, NAMES, time_zone, ...)
+    .replace(/^\s*SET\b[\s\S]*?;$/gmi, "")
+    // DELIMITER, LOCK/UNLOCK, /*! versioned comments */
+    .replace(/^\s*DELIMITER\b.*$/gmi, "")
+    .replace(/^\s*LOCK\s+TABLES[\s\S]*?;$/gmi, "")
+    .replace(/^\s*UNLOCK\s+TABLES\s*;$/gmi, "")
+    .replace(/\/\*![\s\S]*?\*\//g, "")
+    // Comments
+    .replace(/--.*$/gmi, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+
+  // 2) DDL/DML chỉnh cú pháp
+  s = s
+    .replace(/`/g, "")                           // bỏ backticks
+    .replace(/ENGINE=InnoDB[^;]*;/gi, ";")
+    .replace(/ROW_FORMAT=\w+/gi, "")
+    .replace(/AUTO_INCREMENT=\d+/gi, "")
+    .replace(/\s+USING\s+BTREE/gi, "")
+    .replace(/\s+COMMENT\s*=\s*'[^']*'/gi, "")
+    .replace(/\s+COLLATE\s*=\s*\w+/gi, "")
+    .replace(/DEFAULT\s+CHARSET\s*=\s*\w+/gi, "")
+    .replace(/\bbigint\(\d+\)\s+unsigned\b/gi, "INTEGER")
+    .replace(/\bbigint\(\d+\)\b/gi, "INTEGER")
+    .replace(/\bint\(\d+\)\s+unsigned\b/gi, "INTEGER")
+    .replace(/\bint\(\d+\)\b/gi, "INTEGER")
+    .replace(/\bvarchar\(\d+\)\b/gi, "TEXT")
+    .replace(/\btimestamp\s+NULL\s+DEFAULT\s+NULL\b/gi, "TEXT")
+    .replace(/\bPRIMARY\s+KEY\s*\(id\)\s*USING\s+BTREE\b/gi, "PRIMARY KEY (id)")
+    .replace(/\bBEGIN;\s*/gi, "")
+    .replace(/\bCOMMIT;\s*/gi, "");
+
+  // 3) Phòng trường hợp SET còn sót lại: lọc theo câu lệnh
+  const stmts = s.split(/;\s*\n?/).map(t => t.trim()).filter(Boolean);
+  const clean = stmts.filter(t => !/^SET\b/i.test(t)).join(";\n") + ";\n";
+
+  return clean;
 }
 
 async function loadSQLfromURL(url) {
