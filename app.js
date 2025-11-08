@@ -56,23 +56,41 @@ let db;
 let rowsCache = []; // cached mapping rows for quick JS-side matching
 
 // Convert minimal MySQL DDL/DML to SQLite-friendly for sql.js
+// Thay toàn bộ hàm mysqlToSqlite trong app.js bằng bản này
 function mysqlToSqlite(sql) {
   let s = sql
-    .replace(/`/g, '')
-    .replace(/ENGINE=InnoDB[^;]*;/gi, ';')
-    .replace(/AUTO_INCREMENT=\d+/gi, '')
-    .replace(/USING BTREE/gi, '')
+    // 1) Bỏ các dòng cấu hình MySQL
+    .replace(/^SET\s+.*?;$/gmi, '')                 // SET NAMES..., SET FOREIGN_KEY_CHECKS...
+    .replace(/^LOCK\s+TABLES\s+.*?;$/gmi, '')       // LOCK TABLES ...
+    .replace(/^UNLOCK\s+TABLES\s*;$/gmi, '')        // UNLOCK TABLES;
+    .replace(/^DELIMITER\s+.+$/gmi, '')             // DELIMITER ;;
+    .replace(/\/\*![\s\S]*?\*\//g, '')              // /*!40101 ... */ phiên bản có điều kiện
+    // 2) Chuẩn hoá cú pháp
+    .replace(/`/g, '')                              // bỏ backticks
+    .replace(/ENGINE=InnoDB[^;]*;/gi, ';')          // bỏ ENGINE, ROW_FORMAT...
+    .replace(/AUTO_INCREMENT=\d+/gi, '')            // bỏ AUTO_INCREMENT
+    .replace(/USING\s+BTREE/gi, '')                 // bỏ USING BTREE
+    .replace(/ROW_FORMAT=\w+/gi, '')                // bỏ ROW_FORMAT=Dynamic
+    .replace(/\s+COMMENT\s*=\s*'[^']*'/gi, '')      // bỏ COMMENT='...'
+    .replace(/\s+COLLATE\s*=\s*\w+/gi, '')          // bỏ COLLATE=...
+    .replace(/DEFAULT\s+CHARSET\s*=\s*\w+/gi, '')   // bỏ DEFAULT CHARSET=...
+    // 3) Kiểu dữ liệu & ràng buộc
     .replace(/bigint\(\d+\)\s+unsigned/gi, 'INTEGER')
     .replace(/bigint\(\d+\)/gi, 'INTEGER')
     .replace(/int\(\d+\)\s+unsigned/gi, 'INTEGER')
     .replace(/int\(\d+\)/gi, 'INTEGER')
     .replace(/varchar\(\d+\)/gi, 'TEXT')
     .replace(/timestamp\s+NULL\s+DEFAULT\s+NULL/gi, 'TEXT')
-    .replace(/ COLLATE\s*=\s*utf8mb4_unicode_ci/gi, '')
-    .replace(/DEFAULT CHARSET\s*=\s*utf8mb4/gi, '')
+    // 4) Giao dịch MySQL (không cần cho client)
     .replace(/BEGIN;\s*/gi, '')
     .replace(/COMMIT;\s*/gi, '');
-  s = s.replace(/PRIMARY KEY \(id\)\s*USING BTREE/gi, 'PRIMARY KEY (id)');
+
+  // PRIMARY KEY (id) USING BTREE -> PRIMARY KEY (id)
+  s = s.replace(/PRIMARY\s+KEY\s*\(id\)\s*USING\s+BTREE/gi, 'PRIMARY KEY (id)');
+
+  // Một số dump MySQL có IF NOT EXISTS/EXISTS không ảnh hưởng SQLite — giữ nguyên.
+  // Nếu còn syntax lỗi, log ra để xem nhanh:
+  // console.log('SQL after transform:', s);
   return s;
 }
 
