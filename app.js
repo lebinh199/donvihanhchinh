@@ -1,8 +1,9 @@
-// VN Ward Converter — Names Only
-// - Input/Output KHÔNG dùng mã code, chỉ tên: ward/district/province
-// - Nạp ward_mappings.sql (MySQL dump) từ GitHub hoặc file máy
-// - Chuyển đổi old<->new theo bảng ward_mappings (cache client)
+// VN Ward Converter — client-side, GitHub Pages friendly
+// - Nạp ward_mappings.sql từ GitHub Raw URL hoặc từ file local
+// - Hỗ trợ MySQL dump -> chuyển tối thiểu sang SQLite để chạy với sql.js
+// - Chuyển đổi old<->new theo bảng ward_mappings
 
+// ---------- Helpers ----------
 const $ = (s) => document.querySelector(s);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -34,16 +35,18 @@ function parseTable(text) {
   const lines = t.split(/\r?\n/).filter((l) => l.trim().length);
   const rows = lines.map((l) => l.split(delim).map((c) => c.trim()));
   const HEAD = new Set([
-    'old_ward_name', 'old_district_name', 'old_province_name',
-    'new_ward_name', 'new_province_name',
-    'ward_name', 'district_name', 'province_name',
+    'old_ward_code', 'old_ward_name', 'old_district_name', 'old_province_name',
+    'new_ward_code', 'new_ward_name', 'new_province_name',
+    'ward_code', 'ward_name', 'district_name', 'province_name',
   ]);
   const hasHeader = rows[0]?.some((h) => HEAD.has((h || '').toLowerCase()));
-  const header = hasHeader ? rows[0] : ['old_ward_name','old_district_name','old_province_name']; // giả định 3 cột tên cũ
+  const header = hasHeader ? rows[0] : [];
   return { header, rows: hasHeader ? rows.slice(1) : rows };
 }
 
-function joinTSV(rows) { return rows.map((r) => r.join('\t')).join('\n'); }
+function joinTSV(rows) {
+  return rows.map((r) => r.join('\t')).join('\n');
+}
 
 function getCol(cols, header, name) {
   const idx = header.findIndex((h) => (h || '').toLowerCase() === name.toLowerCase());
@@ -51,69 +54,29 @@ function getCol(cols, header, name) {
 }
 
 // ---------- SQL/DB ----------
-let SQL;
+let SQL; // global from sql.js loader (window.initSqlJs)
 let db;
 let rowsCache = []; // cached mapping rows for quick JS-side matching
 
 // Convert minimal MySQL DDL/DML to SQLite-friendly for sql.js
-// Thay toàn bộ hàm mysqlToSqlite bằng bản sau
 function mysqlToSqlite(sql) {
-  let s = sql.replace(/\r\n/g, "\n");
-
-  // 1) Gỡ các lệnh MySQL không hợp lệ với SQLite
-  s = s
-    .replace(/^\s*SET\b[\s\S]*?;$/gmi, "")           // SET ...
-    .replace(/^\s*DELIMITER\b.*$/gmi, "")            // DELIMITER
-    .replace(/^\s*LOCK\s+TABLES[\s\S]*?;$/gmi, "")   // LOCK TABLES
-    .replace(/^\s*UNLOCK\s+TABLES\s*;$/gmi, "")      // UNLOCK TABLES
-    .replace(/\/\*![\s\S]*?\*\//g, "")               // /*! versioned comments */
-    .replace(/--.*$/gmi, "")                         // -- comments
-    .replace(/\/\*[\s\S]*?\*\//g, "");               // /* ... */
-
-  // 2) Chuẩn hoá cú pháp/DLL/DML
-  s = s
-    .replace(/`/g, "")                               // bỏ backticks
-    .replace(/\bENGINE\s*=\s*\w+[^;)]*/gi, "")       // ENGINE=InnoDB ...
-    .replace(/\bROW_FORMAT\s*=\s*\w+/gi, "")
-    .replace(/\bDEFAULT\s+CHARSET\s*=\s*\w+/gi, "")
-    .replace(/\bCHARSET\s*=\s*\w+/gi, "")
-    .replace(/\bCOLLATE\s*=\s*[\w_]+/gi, "")
-    .replace(/\s+COMMENT\s*=\s*'[^']*'/gi, "")
-    .replace(/\s+USING\s+BTREE/gi, "")
-    // Kiểu dữ liệu
-    .replace(/\bbigint\(\d+\)\s+unsigned\b/gi, "INTEGER")
-    .replace(/\bbigint\(\d+\)\b/gi, "INTEGER")
-    .replace(/\bint\(\d+\)\s+unsigned\b/gi, "INTEGER")
-    .replace(/\bint\(\d+\)\b/gi, "INTEGER")
-    .replace(/\bvarchar\(\d+\)\b/gi, "TEXT")
-    .replace(/\btimestamp\s+NULL\s+DEFAULT\s+NULL\b/gi, "TEXT")
-    // BEGIN/COMMIT của MySQL
-    .replace(/\bBEGIN;\s*/gi, "")
-    .replace(/\bCOMMIT;\s*/gi, "");
-
-  // 3) Xử lý AUTO_INCREMENT triệt để
-  // a) Trên cột: ... NOT NULL AUTO_INCREMENT,  ->  ... NOT NULL,
-  s = s.replace(/\bNOT\s+NULL\s+AUTO_INCREMENT\b/gi, "NOT NULL");
-  // b) Trên cột: ... AUTO_INCREMENT,  ->  ... ,
-  s = s.replace(/\s+AUTO_INCREMENT\b/gi, "");
-  // c) Ở phần cuối CREATE TABLE: ) AUTO_INCREMENT=1234 DEFAULT CHARSET=...;
-  s = s.replace(/\)\s*AUTO_INCREMENT\s*=\s*\d+\s*/gi, ") ");
-
-  // 4) Cắt mọi tuỳ chọn sau dấu ')' của CREATE TABLE tới ';'
-  s = s.replace(/\)\s*[^;]*;/g, ");");
-
-  // 5) Sửa USING BTREE trong PRIMARY KEY
-  s = s.replace(/\bPRIMARY\s+KEY\s*\(id\)\s*USING\s+BTREE\b/gi, "PRIMARY KEY (id)");
-
-  // 6) Dọn dấu phẩy thừa
-  s = s.replace(/,\s*\)/g, ")");     // ", )" -> ")"
-  s = s.replace(/\(\s*,/g, "(");     // "( ," -> "("
-
-  // 7) Chia câu lệnh; lọc SET còn sót (phòng hờ)
-  const stmts = s.split(/;\s*\n?/).map(t => t.trim()).filter(Boolean);
-  const clean = stmts.filter(t => !/^SET\b/i.test(t)).join(";\n") + ";\n";
-
-  return clean;
+  let s = sql
+    .replace(/`/g, '')
+    .replace(/ENGINE=InnoDB[^;]*;/gi, ';')
+    .replace(/AUTO_INCREMENT=\d+/gi, '')
+    .replace(/USING BTREE/gi, '')
+    .replace(/bigint\(\d+\)\s+unsigned/gi, 'INTEGER')
+    .replace(/bigint\(\d+\)/gi, 'INTEGER')
+    .replace(/int\(\d+\)\s+unsigned/gi, 'INTEGER')
+    .replace(/int\(\d+\)/gi, 'INTEGER')
+    .replace(/varchar\(\d+\)/gi, 'TEXT')
+    .replace(/timestamp\s+NULL\s+DEFAULT\s+NULL/gi, 'TEXT')
+    .replace(/ COLLATE\s*=\s*utf8mb4_unicode_ci/gi, '')
+    .replace(/DEFAULT CHARSET\s*=\s*utf8mb4/gi, '')
+    .replace(/BEGIN;\s*/gi, '')
+    .replace(/COMMIT;\s*/gi, '');
+  s = s.replace(/PRIMARY KEY \(id\)\s*USING BTREE/gi, 'PRIMARY KEY (id)');
+  return s;
 }
 
 async function loadSQLfromURL(url) {
@@ -128,6 +91,7 @@ async function loadSQLfromURL(url) {
 
 async function initDB(sqlText) {
   if (!SQL) {
+    // initSqlJs is provided by the script tag in index.html
     SQL = await initSqlJs({
       locateFile: (f) => `https://cdn.jsdelivr.net/npm/sql.js@1.10.2/dist/${f}`,
     });
@@ -157,8 +121,12 @@ async function initDB(sqlText) {
   });
 }
 
-// ---------- Matching (names only) ----------
-function matchOldToNew({ ward, district, province }) {
+// ---------- Matching ----------
+function matchOldToNew({ oldCode, ward, district, province }) {
+  if (oldCode) {
+    const hit = rowsCache.find((r) => r.old_ward_code === oldCode);
+    if (hit) return hit;
+  }
   const w = stripDiacritics(ward);
   const d = stripDiacritics(district);
   const p = stripDiacritics(province);
@@ -169,7 +137,11 @@ function matchOldToNew({ ward, district, province }) {
   return pool[0];
 }
 
-function matchNewToOld({ ward, province }) {
+function matchNewToOld({ newCode, ward, province }) {
+  if (newCode) {
+    const hit = rowsCache.find((r) => r.new_ward_code === newCode);
+    if (hit) return hit;
+  }
   const w = stripDiacritics(ward);
   const p = stripDiacritics(province);
   let pool = rowsCache;
@@ -179,21 +151,23 @@ function matchNewToOld({ ward, province }) {
 }
 
 async function convertOne(mode, header, cols) {
+  const oldCode = getCol(cols, header, 'old_ward_code');
+  const newCode = getCol(cols, header, 'new_ward_code');
   const oldWard = getCol(cols, header, 'old_ward_name');
   const oldDist = getCol(cols, header, 'old_district_name');
   const oldProv = getCol(cols, header, 'old_province_name');
-
   const newWard = getCol(cols, header, 'new_ward_name');
   const newProv = getCol(cols, header, 'new_province_name');
-
   const anyWard = getCol(cols, header, 'ward_name');
   const anyDist = getCol(cols, header, 'district_name');
   const anyProv = getCol(cols, header, 'province_name');
 
   let out = {
+    old_ward_code: '',
     old_ward_name: '',
     old_district_name: '',
     old_province_name: '',
+    new_ward_code: '',
     new_ward_name: '',
     new_province_name: '',
     direction: '',
@@ -202,15 +176,18 @@ async function convertOne(mode, header, cols) {
   try {
     if (mode === 'old2new') {
       const hit = matchOldToNew({
+        oldCode,
         ward: oldWard || anyWard,
         district: oldDist || anyDist,
         province: oldProv || anyProv,
       });
       if (hit) {
         out = {
+          old_ward_code: hit.old_ward_code,
           old_ward_name: hit.old_ward_name,
           old_district_name: hit.old_district_name,
           old_province_name: hit.old_province_name,
+          new_ward_code: hit.new_ward_code,
           new_ward_name: hit.new_ward_name,
           new_province_name: hit.new_province_name,
           direction: 'old->new',
@@ -218,22 +195,26 @@ async function convertOne(mode, header, cols) {
       }
     } else {
       const hit = matchNewToOld({
+        newCode,
         ward: newWard || anyWard,
         province: newProv || anyProv,
       });
       if (hit) {
         out = {
+          old_ward_code: hit.old_ward_code,
           old_ward_name: hit.old_ward_name,
           old_district_name: hit.old_district_name,
           old_province_name: hit.old_province_name,
+          new_ward_code: hit.new_ward_code,
           new_ward_name: hit.new_ward_name,
           new_province_name: hit.new_province_name,
           direction: 'new->old',
         };
       }
     }
-  } catch (e) { /* silent per-row */ }
-
+  } catch (e) {
+    // silent per-row
+  }
   return out;
 }
 
@@ -268,9 +249,9 @@ $('#loadSqlFileBtn').addEventListener('click', async () => {
 
 $('#pasteDemoBtn').addEventListener('click', () => {
   $('#input').value =
-    'old_ward_name\told_district_name\told_province_name\n' +
-    'Phường 12\tQuận Gò Vấp\tThành phố Hồ Chí Minh\n' +
-    'Phường 15\tQuận Gò Vấp\tThành phố Hồ Chí Minh';
+    'old_ward_code\told_ward_name\told_district_name\told_province_name\n' +
+    '26881\tPhường 12\tQuận Gò Vấp\tThành phố Hồ Chí Minh\n' +
+    '26872\tPhường 15\tQuận Gò Vấp\tThành phố Hồ Chí Minh';
 });
 
 $('#convertBtn').addEventListener('click', async () => {
@@ -282,23 +263,33 @@ $('#convertBtn').addEventListener('click', async () => {
   const { header, rows } = parseTable($('#input').value);
   const results = [];
   const outHeader = [
-    'old_ward_name', 'old_district_name', 'old_province_name',
-    'new_ward_name', 'new_province_name', 'direction',
+    'old_ward_code',
+    'old_ward_name',
+    'old_district_name',
+    'old_province_name',
+    'new_ward_code',
+    'new_ward_name',
+    'new_province_name',
+    'direction',
   ];
   if (!$('#noHeader').checked) results.push(outHeader);
   let count = 0;
   for (const r of rows) {
     const mapped = await convertOne($('#mode').value, header, r);
     results.push([
+      mapped.old_ward_code,
       mapped.old_ward_name,
       mapped.old_district_name,
       mapped.old_province_name,
+      mapped.new_ward_code,
       mapped.new_ward_name,
       mapped.new_province_name,
       mapped.direction,
     ]);
     count++;
-    if (count % 500 === 0) await sleep(0);
+    if (count % 500 === 0) {
+      await sleep(0); // keep UI responsive
+    }
   }
   out.textContent = joinTSV(results);
   $('#rowCount').textContent = `${count} dòng`;
