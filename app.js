@@ -56,27 +56,24 @@ let db;
 let rowsCache = []; // cached mapping rows for quick JS-side matching
 
 // Convert minimal MySQL DDL/DML to SQLite-friendly for sql.js
-// Thay toàn bộ hàm mysqlToSqlite trong app.js bằng bản này
+// Thay toàn bộ hàm mysqlToSqlite bằng bản sau
 function mysqlToSqlite(sql) {
   let s = sql.replace(/\r\n/g, "\n");
 
-  // 1) Gỡ bỏ các lệnh MySQL không hợp lệ
+  // 1) Gỡ các lệnh MySQL không hợp lệ với SQLite
   s = s
-    .replace(/^\s*SET\b[\s\S]*?;$/gmi, "")
-    .replace(/^\s*DELIMITER\b.*$/gmi, "")
-    .replace(/^\s*LOCK\s+TABLES[\s\S]*?;$/gmi, "")
-    .replace(/^\s*UNLOCK\s+TABLES\s*;$/gmi, "")
-    .replace(/\/\*![\s\S]*?\*\//g, "")      // /*!40101 ... */
-    .replace(/--.*$/gmi, "")                // comment --
-    .replace(/\/\*[\s\S]*?\*\//g, "");      // comment /* */
+    .replace(/^\s*SET\b[\s\S]*?;$/gmi, "")           // SET ...
+    .replace(/^\s*DELIMITER\b.*$/gmi, "")            // DELIMITER
+    .replace(/^\s*LOCK\s+TABLES[\s\S]*?;$/gmi, "")   // LOCK TABLES
+    .replace(/^\s*UNLOCK\s+TABLES\s*;$/gmi, "")      // UNLOCK TABLES
+    .replace(/\/\*![\s\S]*?\*\//g, "")               // /*! versioned comments */
+    .replace(/--.*$/gmi, "")                         // -- comments
+    .replace(/\/\*[\s\S]*?\*\//g, "");               // /* ... */
 
-  // 2) Chuẩn hoá cú pháp/DĐL/DML
+  // 2) Chuẩn hoá cú pháp/DLL/DML
   s = s
-    .replace(/`/g, "")
-    // XÓA MỌI AUTO_INCREMENT (có/không số, có/không =)
-    .replace(/\bAUTO_INCREMENT\b(?:\s*=\s*\d+)?/gi, "")
-    // XÓA engine/charset/collate/row_format/comment…
-    .replace(/\bENGINE\s*=\s*\w+[^;)]*/gi, "")
+    .replace(/`/g, "")                               // bỏ backticks
+    .replace(/\bENGINE\s*=\s*\w+[^;)]*/gi, "")       // ENGINE=InnoDB ...
     .replace(/\bROW_FORMAT\s*=\s*\w+/gi, "")
     .replace(/\bDEFAULT\s+CHARSET\s*=\s*\w+/gi, "")
     .replace(/\bCHARSET\s*=\s*\w+/gi, "")
@@ -90,21 +87,29 @@ function mysqlToSqlite(sql) {
     .replace(/\bint\(\d+\)\b/gi, "INTEGER")
     .replace(/\bvarchar\(\d+\)\b/gi, "TEXT")
     .replace(/\btimestamp\s+NULL\s+DEFAULT\s+NULL\b/gi, "TEXT")
-    // BEGIN/COMMIT của MySQL không cần cho client
+    // BEGIN/COMMIT của MySQL
     .replace(/\bBEGIN;\s*/gi, "")
     .replace(/\bCOMMIT;\s*/gi, "");
 
-  // 3) Với CREATE TABLE … ) ENGINE=… AUTO_INCREMENT=… DEFAULT CHARSET=…;
-  //    → cắt mọi thứ sau dấu ')' tới dấu ';'
+  // 3) Xử lý AUTO_INCREMENT triệt để
+  // a) Trên cột: ... NOT NULL AUTO_INCREMENT,  ->  ... NOT NULL,
+  s = s.replace(/\bNOT\s+NULL\s+AUTO_INCREMENT\b/gi, "NOT NULL");
+  // b) Trên cột: ... AUTO_INCREMENT,  ->  ... ,
+  s = s.replace(/\s+AUTO_INCREMENT\b/gi, "");
+  // c) Ở phần cuối CREATE TABLE: ) AUTO_INCREMENT=1234 DEFAULT CHARSET=...;
+  s = s.replace(/\)\s*AUTO_INCREMENT\s*=\s*\d+\s*/gi, ") ");
+
+  // 4) Cắt mọi tuỳ chọn sau dấu ')' của CREATE TABLE tới ';'
   s = s.replace(/\)\s*[^;]*;/g, ");");
 
-  // 4) PRIMARY KEY (id) USING BTREE → PRIMARY KEY (id)
+  // 5) Sửa USING BTREE trong PRIMARY KEY
   s = s.replace(/\bPRIMARY\s+KEY\s*\(id\)\s*USING\s+BTREE\b/gi, "PRIMARY KEY (id)");
 
-  // 5) Dọn dấu phẩy thừa: ", )" → ")"
-  s = s.replace(/,\s*\)/g, ")");
+  // 6) Dọn dấu phẩy thừa
+  s = s.replace(/,\s*\)/g, ")");     // ", )" -> ")"
+  s = s.replace(/\(\s*,/g, "(");     // "( ," -> "("
 
-  // 6) Tách câu lệnh, loại SET còn sót (phòng hờ)
+  // 7) Chia câu lệnh; lọc SET còn sót (phòng hờ)
   const stmts = s.split(/;\s*\n?/).map(t => t.trim()).filter(Boolean);
   const clean = stmts.filter(t => !/^SET\b/i.test(t)).join(";\n") + ";\n";
 
