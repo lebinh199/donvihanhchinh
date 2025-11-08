@@ -1,7 +1,7 @@
-// VN Ward Converter — client-side, GitHub Pages friendly
-// - Nạp ward_mappings.sql từ GitHub Raw URL hoặc từ file local
-// - Hỗ trợ MySQL dump -> chuyển tối thiểu sang SQLite để chạy với sql.js
-// - Chuyển đổi old<->new theo bảng ward_mappings
+// VN Ward Converter — SQLite-only edition
+// - YÊU CẦU: ward_mappings.sql phải là SQLite hợp lệ (CREATE TABLE ...; INSERT ...;)
+// - KHÔNG còn chuyển MySQL -> SQLite. Nếu file là MySQL, hãy chuyển trước khi nạp.
+// - Input/Output chỉ theo tên (Xã/Phường, Huyện/Quận, Tỉnh/Thành)
 
 // ---------- Helpers ----------
 const $ = (s) => document.querySelector(s);
@@ -35,18 +35,16 @@ function parseTable(text) {
   const lines = t.split(/\r?\n/).filter((l) => l.trim().length);
   const rows = lines.map((l) => l.split(delim).map((c) => c.trim()));
   const HEAD = new Set([
-    'old_ward_code', 'old_ward_name', 'old_district_name', 'old_province_name',
-    'new_ward_code', 'new_ward_name', 'new_province_name',
-    'ward_code', 'ward_name', 'district_name', 'province_name',
+    'old_ward_name', 'old_district_name', 'old_province_name',
+    'new_ward_name', 'new_province_name',
+    'ward_name', 'district_name', 'province_name',
   ]);
   const hasHeader = rows[0]?.some((h) => HEAD.has((h || '').toLowerCase()));
-  const header = hasHeader ? rows[0] : [];
+  const header = hasHeader ? rows[0] : ['old_ward_name','old_district_name','old_province_name'];
   return { header, rows: hasHeader ? rows.slice(1) : rows };
 }
 
-function joinTSV(rows) {
-  return rows.map((r) => r.join('\t')).join('\n');
-}
+function joinTSV(rows) { return rows.map((r) => r.join('\t')).join('\n'); }
 
 function getCol(cols, header, name) {
   const idx = header.findIndex((h) => (h || '').toLowerCase() === name.toLowerCase());
@@ -54,30 +52,7 @@ function getCol(cols, header, name) {
 }
 
 // ---------- SQL/DB ----------
-let SQL; // global from sql.js loader (window.initSqlJs)
-let db;
-let rowsCache = []; // cached mapping rows for quick JS-side matching
-
-// Convert minimal MySQL DDL/DML to SQLite-friendly for sql.js
-function mysqlToSqlite(sql) {
-  let s = sql
-    .replace(/`/g, '')
-    .replace(/ENGINE=InnoDB[^;]*;/gi, ';')
-    .replace(/AUTO_INCREMENT=\d+/gi, '')
-    .replace(/USING BTREE/gi, '')
-    .replace(/bigint\(\d+\)\s+unsigned/gi, 'INTEGER')
-    .replace(/bigint\(\d+\)/gi, 'INTEGER')
-    .replace(/int\(\d+\)\s+unsigned/gi, 'INTEGER')
-    .replace(/int\(\d+\)/gi, 'INTEGER')
-    .replace(/varchar\(\d+\)/gi, 'TEXT')
-    .replace(/timestamp\s+NULL\s+DEFAULT\s+NULL/gi, 'TEXT')
-    .replace(/ COLLATE\s*=\s*utf8mb4_unicode_ci/gi, '')
-    .replace(/DEFAULT CHARSET\s*=\s*utf8mb4/gi, '')
-    .replace(/BEGIN;\s*/gi, '')
-    .replace(/COMMIT;\s*/gi, '');
-  s = s.replace(/PRIMARY KEY \(id\)\s*USING BTREE/gi, 'PRIMARY KEY (id)');
-  return s;
-}
+let SQL; let db; let rowsCache = [];
 
 async function loadSQLfromURL(url) {
   $('#sqlStatus').textContent = 'Đang tải SQL…';
@@ -91,40 +66,43 @@ async function loadSQLfromURL(url) {
 
 async function initDB(sqlText) {
   if (!SQL) {
-    SQL = await initSqlJs({
-      locateFile: (f) => `https://cdn.jsdelivr.net/npm/sql.js@1.10.2/dist/${f}`,
-    });
+    SQL = await initSqlJs({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/sql.js@1.10.2/dist/${f}` });
   }
   db?.close?.();
   db = new SQL.Database();
 
-  // Chỉ chuyển MySQL -> SQLite nếu có dấu hiệu MySQL
-  const isMySQL = /AUTO_INCREMENT|ENGINE=|SET\s|USING\s+BTREE|CHARSET|COLLATE/i.test(sqlText);
-  const textForExec = isMySQL ? mysqlToSqlite(sqlText) : sqlText;
-
-  // (tuỳ chọn) vệ sinh ; thừa nếu có
-  const safeSQL = textForExec
-    .replace(/\r\n/g, "\n")
-    .replace(/;;+/g, ";")         // gộp ;; -> ;
-    .replace(/;\s*$/m, ";");      // đảm bảo kết thúc hợp lệ
+  // Không chuyển MySQL → SQLite nữa; giả định file là SQLite chuẩn
+  const safeSQL = sqlText.replace(/\r\n/g, "\n").replace(/;;+/g, ';');
 
   try {
     db.exec(safeSQL);
   } catch (e) {
-    console.error("SQLite exec error:", e);
-    console.log("SQL preview >>>\n", safeSQL.slice(0, 1000));
+    console.error('SQLite exec error:', e);
+    console.log('SQL preview >>>\n', safeSQL.slice(0, 1500));
     throw e;
   }
 
-  // ... phần cache SELECT giữ nguyên
+  // Cache mapping table
+  const res = db.exec(
+    'SELECT old_ward_code,old_ward_name,old_district_name,old_province_name, new_ward_code,new_ward_name,new_province_name FROM ward_mappings'
+  );
+  const cols = res[0]?.columns || [];
+  const data = res[0]?.values || [];
+  rowsCache = data.map((v) => {
+    const o = Object.fromEntries(cols.map((c, i) => [c, (v[i] ?? '') + '']));
+    return {
+      ...o,
+      _old_ward_name: stripDiacritics(o.old_ward_name),
+      _old_district_name: stripDiacritics(o.old_district_name),
+      _old_province_name: stripDiacritics(o.old_province_name),
+      _new_ward_name: stripDiacritics(o.new_ward_name),
+      _new_province_name: stripDiacritics(o.new_province_name),
+    };
+  });
 }
 
-// ---------- Matching ----------
-function matchOldToNew({ oldCode, ward, district, province }) {
-  if (oldCode) {
-    const hit = rowsCache.find((r) => r.old_ward_code === oldCode);
-    if (hit) return hit;
-  }
+// ---------- Matching (names only) ----------
+function matchOldToNew({ ward, district, province }) {
   const w = stripDiacritics(ward);
   const d = stripDiacritics(district);
   const p = stripDiacritics(province);
@@ -135,11 +113,7 @@ function matchOldToNew({ oldCode, ward, district, province }) {
   return pool[0];
 }
 
-function matchNewToOld({ newCode, ward, province }) {
-  if (newCode) {
-    const hit = rowsCache.find((r) => r.new_ward_code === newCode);
-    if (hit) return hit;
-  }
+function matchNewToOld({ ward, province }) {
   const w = stripDiacritics(ward);
   const p = stripDiacritics(province);
   let pool = rowsCache;
@@ -149,8 +123,6 @@ function matchNewToOld({ newCode, ward, province }) {
 }
 
 async function convertOne(mode, header, cols) {
-  const oldCode = getCol(cols, header, 'old_ward_code');
-  const newCode = getCol(cols, header, 'new_ward_code');
   const oldWard = getCol(cols, header, 'old_ward_name');
   const oldDist = getCol(cols, header, 'old_district_name');
   const oldProv = getCol(cols, header, 'old_province_name');
@@ -161,11 +133,9 @@ async function convertOne(mode, header, cols) {
   const anyProv = getCol(cols, header, 'province_name');
 
   let out = {
-    old_ward_code: '',
     old_ward_name: '',
     old_district_name: '',
     old_province_name: '',
-    new_ward_code: '',
     new_ward_name: '',
     new_province_name: '',
     direction: '',
@@ -174,18 +144,15 @@ async function convertOne(mode, header, cols) {
   try {
     if (mode === 'old2new') {
       const hit = matchOldToNew({
-        oldCode,
         ward: oldWard || anyWard,
         district: oldDist || anyDist,
         province: oldProv || anyProv,
       });
       if (hit) {
         out = {
-          old_ward_code: hit.old_ward_code,
           old_ward_name: hit.old_ward_name,
           old_district_name: hit.old_district_name,
           old_province_name: hit.old_province_name,
-          new_ward_code: hit.new_ward_code,
           new_ward_name: hit.new_ward_name,
           new_province_name: hit.new_province_name,
           direction: 'old->new',
@@ -193,49 +160,36 @@ async function convertOne(mode, header, cols) {
       }
     } else {
       const hit = matchNewToOld({
-        newCode,
         ward: newWard || anyWard,
         province: newProv || anyProv,
       });
       if (hit) {
         out = {
-          old_ward_code: hit.old_ward_code,
           old_ward_name: hit.old_ward_name,
           old_district_name: hit.old_district_name,
           old_province_name: hit.old_province_name,
-          new_ward_code: hit.new_ward_code,
           new_ward_name: hit.new_ward_name,
           new_province_name: hit.new_province_name,
           direction: 'new->old',
         };
       }
     }
-  } catch (e) {
-    // silent per-row
-  }
+  } catch (e) { /* silent */ }
+
   return out;
 }
 
 // ---------- UI wiring ----------
 $('#loadSqlBtn').addEventListener('click', async () => {
   const url = $('#sqlUrl').value.trim();
-  if (!url) {
-    $('#sqlStatus').innerHTML = '<span class="err">Hãy nhập URL SQL.</span>';
-    return;
-  }
-  try {
-    await loadSQLfromURL(url);
-  } catch (e) {
-    $('#sqlStatus').innerHTML = '<span class="err">' + (e.message || e) + '</span>';
-  }
+  if (!url) { $('#sqlStatus').innerHTML = '<span class="err">Hãy nhập URL SQL.</span>'; return; }
+  try { await loadSQLfromURL(url); }
+  catch (e) { $('#sqlStatus').innerHTML = '<span class="err">' + (e.message || e) + '</span>'; }
 });
 
 $('#loadSqlFileBtn').addEventListener('click', async () => {
   const f = $('#sqlFile').files?.[0];
-  if (!f) {
-    $('#sqlStatus').innerHTML = '<span class="err">Chưa chọn file .sql</span>';
-    return;
-  }
+  if (!f) { $('#sqlStatus').innerHTML = '<span class="err">Chưa chọn file .sql</span>'; return; }
   try {
     const text = await f.text();
     await initDB(text);
@@ -247,47 +201,34 @@ $('#loadSqlFileBtn').addEventListener('click', async () => {
 
 $('#pasteDemoBtn').addEventListener('click', () => {
   $('#input').value =
-    'old_ward_code\told_ward_name\told_district_name\told_province_name\n' +
-    '26881\tPhường 12\tQuận Gò Vấp\tThành phố Hồ Chí Minh\n' +
-    '26872\tPhường 15\tQuận Gò Vấp\tThành phố Hồ Chí Minh';
+    'old_ward_name\told_district_name\told_province_name\n' +
+    'Phường 12\tQuận Gò Vấp\tThành phố Hồ Chí Minh\n' +
+    'Phường 15\tQuận Gò Vấp\tThành phố Hồ Chí Minh';
 });
 
 $('#convertBtn').addEventListener('click', async () => {
   const out = $('#output');
-  if (!db) {
-    out.textContent = 'Chưa nạp SQL.';
-    return;
-  }
+  if (!db) { out.textContent = 'Chưa nạp SQL.'; return; }
   const { header, rows } = parseTable($('#input').value);
   const results = [];
   const outHeader = [
-    'old_ward_code',
-    'old_ward_name',
-    'old_district_name',
-    'old_province_name',
-    'new_ward_code',
-    'new_ward_name',
-    'new_province_name',
-    'direction',
+    'old_ward_name','old_district_name','old_province_name',
+    'new_ward_name','new_province_name','direction',
   ];
   if (!$('#noHeader').checked) results.push(outHeader);
   let count = 0;
   for (const r of rows) {
     const mapped = await convertOne($('#mode').value, header, r);
     results.push([
-      mapped.old_ward_code,
       mapped.old_ward_name,
       mapped.old_district_name,
       mapped.old_province_name,
-      mapped.new_ward_code,
       mapped.new_ward_name,
       mapped.new_province_name,
       mapped.direction,
     ]);
     count++;
-    if (count % 500 === 0) {
-      await sleep(0); // keep UI responsive
-    }
+    if (count % 500 === 0) await sleep(0);
   }
   out.textContent = joinTSV(results);
   $('#rowCount').textContent = `${count} dòng`;
@@ -306,7 +247,6 @@ $('#copyBtn').addEventListener('click', async () => {
     $('#sqlUrl').value = defaultUrl;
     await loadSQLfromURL(defaultUrl);
   } catch (e) {
-    $('#sqlStatus').innerHTML =
-      '<span class="muted">Không tìm thấy ward_mappings.sql tại root. Vui lòng nhập URL hoặc chọn file.</span>';
+    $('#sqlStatus').innerHTML = '<span class="muted">Không tìm thấy ward_mappings.sql tại root. Vui lòng nhập URL hoặc chọn file.</span>';
   }
 })();
