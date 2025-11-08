@@ -91,7 +91,6 @@ async function loadSQLfromURL(url) {
 
 async function initDB(sqlText) {
   if (!SQL) {
-    // initSqlJs is provided by the script tag in index.html
     SQL = await initSqlJs({
       locateFile: (f) => `https://cdn.jsdelivr.net/npm/sql.js@1.10.2/dist/${f}`,
     });
@@ -99,26 +98,25 @@ async function initDB(sqlText) {
   db?.close?.();
   db = new SQL.Database();
 
-  const sqliteSQL = mysqlToSqlite(sqlText);
-  db.exec(sqliteSQL);
+  // Chỉ chuyển MySQL -> SQLite nếu có dấu hiệu MySQL
+  const isMySQL = /AUTO_INCREMENT|ENGINE=|SET\s|USING\s+BTREE|CHARSET|COLLATE/i.test(sqlText);
+  const textForExec = isMySQL ? mysqlToSqlite(sqlText) : sqlText;
 
-  // Cache mapping table
-  const res = db.exec(
-    'SELECT old_ward_code,old_ward_name,old_district_name,old_province_name, new_ward_code,new_ward_name,new_province_name FROM ward_mappings'
-  );
-  const cols = res[0]?.columns || [];
-  const data = res[0]?.values || [];
-  rowsCache = data.map((v) => {
-    const o = Object.fromEntries(cols.map((c, i) => [c, (v[i] ?? '') + '']));
-    return {
-      ...o,
-      _old_ward_name: stripDiacritics(o.old_ward_name),
-      _old_district_name: stripDiacritics(o.old_district_name),
-      _old_province_name: stripDiacritics(o.old_province_name),
-      _new_ward_name: stripDiacritics(o.new_ward_name),
-      _new_province_name: stripDiacritics(o.new_province_name),
-    };
-  });
+  // (tuỳ chọn) vệ sinh ; thừa nếu có
+  const safeSQL = textForExec
+    .replace(/\r\n/g, "\n")
+    .replace(/;;+/g, ";")         // gộp ;; -> ;
+    .replace(/;\s*$/m, ";");      // đảm bảo kết thúc hợp lệ
+
+  try {
+    db.exec(safeSQL);
+  } catch (e) {
+    console.error("SQLite exec error:", e);
+    console.log("SQL preview >>>\n", safeSQL.slice(0, 1000));
+    throw e;
+  }
+
+  // ... phần cache SELECT giữ nguyên
 }
 
 // ---------- Matching ----------
